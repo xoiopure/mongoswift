@@ -13,61 +13,22 @@ internal class ConnectionString {
         }
         self._uri = uri
 
-        try self.applyOptions(options)
+        try self.applyAndValidateOptions(options)
     }
 
+    /// This method applies various options set in the options struct the underlying `mongoc_uri_t`. In addition, it
+    /// performs extra validation that libmongoc fails to perform. See CDRIVER-3723 for details.
     // swiftlint:disable:next cyclomatic_complexity
-    private func applyOptions(_ options: MongoClientOptions?) throws {
+    private func applyAndValidateOptions(_ options: MongoClientOptions?) throws {
+        try self.applyAndValidateConnectionPoolOptions(options)
+        try self.applyAndValidateCompressionOptions(options)
+        try self.applyAndValidateTLSOptions(options)
+        try self.applyAndValidateDirectConnection(options)
+        try self.applyAndValidateAuthOptions(options)
+
         if let appName = options?.appName {
             guard mongoc_uri_set_option_as_utf8(self._uri, MONGOC_URI_APPNAME, appName) else {
                 throw MongoError.InvalidArgumentError(message: "Failed to set appName to \(appName)")
-            }
-        }
-
-        if let compressors = options?.compressors {
-            // user specified an empty array, so we should nil out any compressors set via connection string.
-            guard !compressors.isEmpty else {
-                guard mongoc_uri_set_compressors(self._uri, nil) else {
-                    throw MongoError.InvalidArgumentError(message: "Failed to set compressors to nil")
-                }
-                return
-            }
-
-            // otherwise, the only valid inputs is a length 1 array containing either zlib or zlib with a level.
-            guard compressors.count == 1 else {
-                throw MongoError.InvalidArgumentError(message: "zlib compressor provided multiple times")
-            }
-
-            let compressor = compressors[0]
-            switch compressor._compressor {
-            case let .zlib(level):
-                guard mongoc_uri_set_compressors(self._uri, "zlib") else {
-                    throw MongoError.InvalidArgumentError(message: "Failed to set compressor to zlib")
-                }
-
-                if let level = level {
-                    guard mongoc_uri_set_option_as_int32(self._uri, MONGOC_URI_ZLIBCOMPRESSIONLEVEL, level) else {
-                        throw MongoError.InvalidArgumentError(message:
-                            "Failed to set zLibCompressionLevel to \(level)"
-                        )
-                    }
-                }
-            }
-        }
-
-        if let credential = options?.credential {
-            try self.setMongoCredential(credential)
-        }
-
-        // Per SDAM spec: If the ``directConnection`` option is not specified, newly developed drivers MUST behave as
-        // if it was specified with the false value.
-        if let dc = options?.directConnection {
-            guard mongoc_uri_set_option_as_bool(self._uri, MONGOC_URI_DIRECTCONNECTION, dc) else {
-                throw MongoError.InvalidArgumentError(message: "Failed to set directConnection to \(dc)")
-            }
-        } else if !self.hasOption("directConnection") {
-            guard mongoc_uri_set_option_as_bool(self._uri, MONGOC_URI_DIRECTCONNECTION, false) else {
-                throw MongoError.InvalidArgumentError(message: "Failed to set directConnection to false")
             }
         }
 
@@ -98,25 +59,6 @@ internal class ConnectionString {
             // not overridden via options struct, validate it ourselves here.
         } else if let uriValue = self.options?[MONGOC_URI_LOCALTHRESHOLDMS]?.int32Value, uriValue < 0 {
             throw MongoError.InvalidArgumentError(message: String(format: invalidThresholdMsg, uriValue))
-        }
-
-        if let maxPoolSize = options?.maxPoolSize {
-            guard let value = Int32(exactly: maxPoolSize), value > 0 else {
-                throw MongoError.InvalidArgumentError(
-                    message: "Invalid maxPoolSize \(maxPoolSize): must be between 1 and \(Int32.max)"
-                )
-            }
-            guard mongoc_uri_set_option_as_int32(self._uri, MONGOC_URI_MAXPOOLSIZE, value) else {
-                throw MongoError.InvalidArgumentError(message: "Failed to set maxPoolSize to \(value)")
-            }
-        }
-
-        // the way libmongoc has implemented this option is not in line with the way users would expect a minPoolSize
-        // option to behave. throw an error if we detect it to prevent users from inadvertently using it.
-        // once we own our own connection pool we will implement this option correctly.
-        // see: http://mongoc.org/libmongoc/current/mongoc_client_pool_min_size.html
-        if self.hasOption(MONGOC_URI_MINPOOLSIZE) {
-            throw MongoError.InvalidArgumentError(message: "Unsupported connection string option minPoolSize")
         }
 
         if let rc = options?.readConcern {
@@ -160,9 +102,119 @@ internal class ConnectionString {
             throw MongoError.InvalidArgumentError(message: String(format: invalidSSTimeoutMsg, uriValue))
         }
 
+        if let wc = options?.writeConcern {
+            self.writeConcern = wc
+        }
+    }
+
+    private func applyAndValidateCompressionOptions(_ options: MongoClientOptions?) throws {
+        if let compressors = options?.compressors {
+            // user specified an empty array, so we should nil out any compressors set via connection string.
+            guard !compressors.isEmpty else {
+                guard mongoc_uri_set_compressors(self._uri, nil) else {
+                    throw MongoError.InvalidArgumentError(message: "Failed to set compressors to nil")
+                }
+                return
+            }
+
+            // otherwise, the only valid inputs is a length 1 array containing either zlib or zlib with a level.
+            guard compressors.count == 1 else {
+                throw MongoError.InvalidArgumentError(message: "zlib compressor provided multiple times")
+            }
+
+            let compressor = compressors[0]
+            switch compressor._compressor {
+            case let .zlib(level):
+                guard mongoc_uri_set_compressors(self._uri, "zlib") else {
+                    throw MongoError.InvalidArgumentError(message: "Failed to set compressor to zlib")
+                }
+
+                if let level = level {
+                    guard mongoc_uri_set_option_as_int32(self._uri, MONGOC_URI_ZLIBCOMPRESSIONLEVEL, level) else {
+                        throw MongoError.InvalidArgumentError(message:
+                            "Failed to set zLibCompressionLevel to \(level)"
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private func applyAndValidateConnectionPoolOptions(_ options: MongoClientOptions?) throws {
+        if let maxPoolSize = options?.maxPoolSize {
+            guard let value = Int32(exactly: maxPoolSize), value > 0 else {
+                throw MongoError.InvalidArgumentError(
+                    message: "Invalid maxPoolSize \(maxPoolSize): must be between 1 and \(Int32.max)"
+                )
+            }
+            guard mongoc_uri_set_option_as_int32(self._uri, MONGOC_URI_MAXPOOLSIZE, value) else {
+                throw MongoError.InvalidArgumentError(message: "Failed to set maxPoolSize to \(value)")
+            }
+        }
+
+        // the way libmongoc has implemented this option is not in line with the way users would expect a minPoolSize
+        // option to behave. throw an error if we detect it to prevent users from inadvertently using it.
+        // once we own our own connection pool we will implement this option correctly.
+        // see: http://mongoc.org/libmongoc/current/mongoc_client_pool_min_size.html
+        guard !self.hasOption(MONGOC_URI_MINPOOLSIZE) else {
+            throw MongoError.InvalidArgumentError(message: "Unsupported connection string option minPoolSize")
+        }
+
+        // libmongoc has reserved all of these as known options keywords so no warnings are generated, however they
+        // actually have no effect, so we should prevent users from trying to use them.
+        if self.hasOption(MONGOC_URI_MAXIDLETIMEMS) {
+            throw MongoError.InvalidArgumentError(message: "Unsupported connection string option maxIdleTimeMS")
+        }
+        if self.hasOption(MONGOC_URI_WAITQUEUEMULTIPLE) {
+            throw MongoError.InvalidArgumentError(message: "Unsupported connection string option waitQueueMultiple")
+        }
+        if self.hasOption(MONGOC_URI_WAITQUEUEMULTIPLE) {
+            throw MongoError.InvalidArgumentError(message: "Unsupported connection string option waitQueueTimeoutMS")
+        }
+    }
+
+    // swiftlint:disable:next cyclomatic_complexity
+    private func applyAndValidateTLSOptions(_ options: MongoClientOptions?) throws {
         if let tls = options?.tls {
+            // per URI options spec, we must raise an error if all instances of tls and ssl do not have the same value.
+            // we don't allow setting `ssl`  via options struct, so we only need to worry about this particular
+            // combination. if clashing values are provided in the input connection string, libmongoc will error.
+            if let uriSSL = self.options?[MONGOC_URI_SSL]?.boolValue {
+                guard uriSSL == tls else {
+                    throw MongoError.InvalidArgumentError(
+                        message: "ssl and tls options cannot both be specified with different values: " +
+                            "got ssl=\(uriSSL), tls=\(tls)"
+                    )
+                }
+            }
+
             guard mongoc_uri_set_option_as_bool(self._uri, MONGOC_URI_TLS, tls) else {
                 throw MongoError.InvalidArgumentError(message: "Failed to set tls to \(tls)")
+            }
+        }
+
+        if options?.tlsInsecure != nil || self.hasOption(MONGOC_URI_TLSINSECURE) {
+            // per URI options spec, we must raise an error if tlsInsecure is provided along with either of
+            // tlsAllowInvalidCertificates or tlsAllowInvalidHostnames. if such a combination is provided in the
+            // input connection string, libmongoc will error.
+            if options?.tlsAllowInvalidCertificates != nil || self.hasOption(MONGOC_URI_TLSALLOWINVALIDCERTIFICATES) {
+                throw MongoError.InvalidArgumentError(
+                    message: "tlsInsecure and tlsAllowInvalidCertificates options cannot both be specified"
+                )
+            }
+
+            if options?.tlsAllowInvalidHostnames != nil || self.hasOption(MONGOC_URI_TLSALLOWINVALIDHOSTNAMES) {
+                throw MongoError.InvalidArgumentError(
+                    message: "tlsInsecure and tlsAllowInvalidHostnames options cannot both be specified"
+                )
+            }
+
+            if let tlsInsecure = options?.tlsInsecure {
+                guard mongoc_uri_set_option_as_bool(self._uri, MONGOC_URI_TLSINSECURE, tlsInsecure) else {
+                    throw MongoError.InvalidArgumentError(
+                        message: "Failed to set tlsInsecure to \(tlsInsecure)"
+                    )
+                }
             }
         }
 
@@ -203,9 +255,64 @@ internal class ConnectionString {
                 throw MongoError.InvalidArgumentError(message: "Failed to set tlsCertificateKeyPassword")
             }
         }
+    }
 
-        if let wc = options?.writeConcern {
-            self.writeConcern = wc
+    private func applyAndValidateDirectConnection(_ options: MongoClientOptions?) throws {
+        // Per SDAM spec: If the ``directConnection`` option is not specified, newly developed drivers MUST behave as
+        // if it was specified with the false value.
+        if let dc = options?.directConnection {
+            guard !(dc && self.usesDNSSeedlistFormat) else {
+                throw MongoError.InvalidArgumentError(
+                    message: "directConnection=true is incompatible with mongodb+srv connection strings"
+                )
+            }
+
+            guard mongoc_uri_set_option_as_bool(self._uri, MONGOC_URI_DIRECTCONNECTION, dc) else {
+                throw MongoError.InvalidArgumentError(message: "Failed to set directConnection to \(dc)")
+            }
+        } else if !self.hasOption("directConnection") {
+            guard mongoc_uri_set_option_as_bool(self._uri, MONGOC_URI_DIRECTCONNECTION, false) else {
+                throw MongoError.InvalidArgumentError(message: "Failed to set directConnection to false")
+            }
+        }
+    }
+
+    /// Sets credential properties in the URI string
+    private func applyAndValidateAuthOptions(_ options: MongoClientOptions?) throws {
+        guard let credential = options?.credential else {
+            return
+        }
+
+        if let username = credential.username {
+            guard mongoc_uri_set_username(self._uri, username) else {
+                throw MongoError.InvalidArgumentError(message: "Cannot set username to \(username).")
+            }
+        }
+
+        if let password = credential.password {
+            guard mongoc_uri_set_password(self._uri, password) else {
+                throw MongoError.InvalidArgumentError(message: "Cannot set password.")
+            }
+        }
+
+        if let authSource = credential.source {
+            guard mongoc_uri_set_auth_source(self._uri, authSource) else {
+                throw MongoError.InvalidArgumentError(message: "Cannot set authSource to \(authSource).")
+            }
+        }
+
+        if let mechanism = credential.mechanism {
+            guard mongoc_uri_set_auth_mechanism(self._uri, mechanism.name) else {
+                throw MongoError.InvalidArgumentError(message: "Cannot set mechanism to \(mechanism)).")
+            }
+        }
+
+        try credential.mechanismProperties?.withBSONPointer { mechanismPropertiesPtr in
+            guard mongoc_uri_set_mechanism_properties(self._uri, mechanismPropertiesPtr) else {
+                throw MongoError.InvalidArgumentError(
+                    message: "Cannot set mechanismProperties to \(String(describing: credential.mechanismProperties))."
+                )
+            }
         }
     }
 
@@ -404,6 +511,12 @@ internal class ConnectionString {
         return String(cString: appName)
     }
 
+    internal var usesDNSSeedlistFormat: Bool {
+        // This method returns a string if this URI’s scheme is “mongodb+srv://”, or NULL if the scheme is
+        // “mongodb://”.
+        mongoc_uri_get_service(self._uri) != nil
+    }
+
     private func hasOption(_ option: String) -> Bool {
         mongoc_uri_has_option(self._uri, option)
     }
@@ -411,40 +524,5 @@ internal class ConnectionString {
     /// Executes the provided closure using a pointer to the underlying `mongoc_uri_t`.
     internal func withMongocURI<T>(_ body: (OpaquePointer) throws -> T) rethrows -> T {
         try body(self._uri)
-    }
-
-    /// Sets credential properties in the URI string
-    internal func setMongoCredential(_ credential: MongoCredential) throws {
-        if let username = credential.username {
-            guard mongoc_uri_set_username(self._uri, username) else {
-                throw MongoError.InvalidArgumentError(message: "Cannot set username to \(username).")
-            }
-        }
-
-        if let password = credential.password {
-            guard mongoc_uri_set_password(self._uri, password) else {
-                throw MongoError.InvalidArgumentError(message: "Cannot set password.")
-            }
-        }
-
-        if let authSource = credential.source {
-            guard mongoc_uri_set_auth_source(self._uri, authSource) else {
-                throw MongoError.InvalidArgumentError(message: "Cannot set authSource to \(authSource).")
-            }
-        }
-
-        if let mechanism = credential.mechanism {
-            guard mongoc_uri_set_auth_mechanism(self._uri, mechanism.name) else {
-                throw MongoError.InvalidArgumentError(message: "Cannot set mechanism to \(mechanism)).")
-            }
-        }
-
-        try credential.mechanismProperties?.withBSONPointer { mechanismPropertiesPtr in
-            guard mongoc_uri_set_mechanism_properties(self._uri, mechanismPropertiesPtr) else {
-                throw MongoError.InvalidArgumentError(
-                    message: "Cannot set mechanismProperties to \(String(describing: credential.mechanismProperties))."
-                )
-            }
-        }
     }
 }

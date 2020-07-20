@@ -64,7 +64,6 @@ struct TestCredential: Decodable {
 // however, when encountering an invalid option, mongoc_uri_new_with_error logs a warning but also returns null
 // and fills out an error which we throw. so all of these warning cases are upconverted to errors. See CDRIVER-3167.
 let shouldWarnButLibmongocErrors: [String: [String]] = [
-    "connection-pool-options.json": ["Non-numeric maxIdleTimeMS causes a warning"],
     "single-threaded-options.json": ["Invalid serverSelectionTryOnce causes a warning"],
     "read-preference-options.json": [
         "Invalid readPreferenceTags causes a warning",
@@ -107,14 +106,16 @@ let shouldWarnButLibmongocErrors: [String: [String]] = [
 ]
 // libmongoc does not validate negative timeout values and will leave these values in the URI. Also see CDRIVER-3167.
 let shouldWarnButLibmongocAllows: [String: [String]] = [
-    "connection-pool-options.json": ["Too low maxIdleTimeMS causes a warning"],
     "read-preference-options.json": ["Too low maxStalenessSeconds causes a warning"]
 ]
 
 // tests we skip because we don't support the specified behavior.
 let skipUnsupported: [String: [String]] = [
     "compression-options.json": ["Multiple compressors are parsed correctly"], // requires Snappy, see SWIFT-894
-    "valid-db-with-dotted-name.json": ["*"] // libmongoc doesn't allow db names in dotted form in the URI
+    "valid-db-with-dotted-name.json": ["*"], // libmongoc doesn't allow db names in dotted form in the URI
+    "connection-pool-options.json": ["*"], // all of these tests use maxIdleTimeMS, which we don't support.
+    // also requires maxIdleTimeMS.
+    "connection-options.json": ["Valid connection and timeout options are parsed correctly"]
 ]
 
 func shouldSkip(file: String, test: String) -> Bool {

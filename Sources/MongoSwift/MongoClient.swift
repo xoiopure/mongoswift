@@ -96,6 +96,12 @@ public struct MongoClientOptions: CodingStrategyProvider {
     /// Specifies the password to de-crypt the `tlsCertificateKeyFile`.
     public var tlsCertificateKeyFilePassword: String?
 
+    /// When specifies, TLS constraints will be relaxed as much as possible. Currently, setting this option to true
+    /// is equivalent to setting both `tlsAllowInvalidCertificates` and `tlsAllowInvalidHostnames` to `true`.
+    /// It is an error to specify both this option and either of `tlsAllowInvalidCertificates` or
+    /// `tlsAllowInvalidHostnames`, either via this options struct, connection string, or a combination of both.
+    public var tlsInsecure: Bool?
+
     /// Specifies the `UUIDCodingStrategy` to use for BSON encoding/decoding operations performed by this client and any
     /// databases or collections that derive from it.
     public var uuidCodingStrategy: UUIDCodingStrategy?
